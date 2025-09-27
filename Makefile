@@ -47,26 +47,29 @@ endif
 # Target executable
 TARGET = mutagen
 
+# Default target
+all: $(TARGET)
+
 # Link the object files to create the executable and then delete .o files
 $(TARGET): $(OBJS) $(CUDA_OBJS)
-        $(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS) $(CUDA_OBJS) $(LIBS)
-        rm -f $(OBJS) $(CUDA_OBJS) && chmod +x $(TARGET)
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS) $(CUDA_OBJS) $(LIBS)
+	rm -f $(OBJS) $(CUDA_OBJS) && chmod +x $(TARGET)
 
 # Compile each source file into an object file
 %.o: %.cpp
-        $(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 gpu_hash_cuda.o: gpu_hash_cuda.cu
 ifeq ($(NVCC),)
-        @echo "Skipping CUDA build; nvcc not available."
+	@echo "Skipping CUDA build; nvcc not available."
 else
-        $(NVCC) $(NVCCFLAGS) -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 endif
 
 # Clean up build files
 clean:
-        @echo "Cleaning..."
-        rm -f $(OBJS) $(CUDA_OBJS) $(TARGET)
+	@echo "Cleaning..."
+	rm -f $(OBJS) $(CUDA_OBJS) $(TARGET)
 
 # Phony targets
 .PHONY: all clean
@@ -84,7 +87,7 @@ CHECK_COMPILER := $(shell which $(CXX))
 ifeq ($(CHECK_COMPILER),)
   $(info Compiler not found. Adding MSYS path to the environment...)
   SHELL := powershell
-  PATH := C:\msys64\mingw64\bin;$(PATH)
+  PATH := C:\\msys64\\mingw64\\bin;$(PATH)
 endif
 
 # Compiler flags (without LTO)
@@ -118,17 +121,17 @@ all: $(TARGET)
 
 # Link the object files to create the executable
 $(TARGET): $(OBJS)
-        $(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
-        del /q $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
+	del /q $(OBJS)
 
 # Compile each source file into an object file
 %.o: %.cpp
-        $(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean up build files
 clean:
-        @echo Cleaning...
-        del /q $(OBJS) $(TARGET)
+	@echo Cleaning...
+	del /q $(OBJS) $(TARGET)
 
 # Phony targets
 .PHONY: all clean
