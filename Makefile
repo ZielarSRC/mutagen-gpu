@@ -11,6 +11,10 @@ ifeq ($(UNAME_S),Linux)
 # Compiler
 CXX = g++
 
+# Detect CUDA compiler
+NVCC := $(shell command -v nvcc 2>/dev/null)
+CUDA_PATH ?= /usr/local/cuda
+
 # Compiler flags
 CXXFLAGS = -m64 -std=c++17 -Ofast -mssse3 -Wall -Wextra \
            -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
@@ -22,31 +26,50 @@ CXXFLAGS = -m64 -std=c++17 -Ofast -mssse3 -Wall -Wextra \
 
 # Source files
 SRCS = mutagen.cpp SECP256K1.cpp Int.cpp IntGroup.cpp IntMod.cpp \
-       Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp
+       Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp gpu_hash.cpp
 
 # Object files
 OBJS = $(SRCS:.cpp=.o)
 
+# CUDA settings
+CUDA_OBJS =
+LIBS =
+ifeq ($(NVCC),)
+  $(info CUDA compiler not found - building CPU-only binary.)
+else
+  CUDA_OBJS = gpu_hash_cuda.o
+  CXXFLAGS += -DMUTAGEN_HAS_CUDA
+  NVCCFLAGS = -O3 -std=c++17 -Xcompiler "-m64"
+  NVCCFLAGS += -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86
+  LIBS += -L$(CUDA_PATH)/lib64 -lcudart
+endif
+
 # Target executable
 TARGET = mutagen
 
-
 # Link the object files to create the executable and then delete .o files
-$(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
-	rm -f $(OBJS) && chmod +x $(TARGET)
+$(TARGET): $(OBJS) $(CUDA_OBJS)
+        $(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS) $(CUDA_OBJS) $(LIBS)
+        rm -f $(OBJS) $(CUDA_OBJS) && chmod +x $(TARGET)
 
 # Compile each source file into an object file
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+        $(CXX) $(CXXFLAGS) -c $< -o $@
+
+gpu_hash_cuda.o: gpu_hash_cuda.cu
+ifeq ($(NVCC),)
+        @echo "Skipping CUDA build; nvcc not available."
+else
+        $(NVCC) $(NVCCFLAGS) -c $< -o $@
+endif
 
 # Clean up build files
 clean:
-	@echo "Cleaning..."
-	rm -f $(OBJS) $(TARGET)
+        @echo "Cleaning..."
+        rm -f $(OBJS) $(CUDA_OBJS) $(TARGET)
 
 # Phony targets
-.PHONY: all clean 
+.PHONY: all clean
 
 else
 # Windows settings (MinGW-w64)
@@ -82,7 +105,7 @@ endif
 
 # Source files
 SRCS = mutagen.cpp SECP256K1.cpp Int.cpp IntGroup.cpp IntMod.cpp \
-       Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp
+       Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp gpu_hash.cpp
 
 # Object files
 OBJS = $(SRCS:.cpp=.o)
@@ -95,17 +118,17 @@ all: $(TARGET)
 
 # Link the object files to create the executable
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
-	del /q $(OBJS)
+        $(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
+        del /q $(OBJS)
 
 # Compile each source file into an object file
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+        $(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean up build files
 clean:
-	@echo Cleaning...
-	del /q $(OBJS) $(TARGET)
+        @echo Cleaning...
+        del /q $(OBJS) $(TARGET)
 
 # Phony targets
 .PHONY: all clean
