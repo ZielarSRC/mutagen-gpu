@@ -167,7 +167,8 @@ struct AtomicUint128 {
   }
 };
 
-AtomicUint128 total_processed;
+AtomicUint128 total_processed_combos;
+AtomicUint128 total_processed_keys;
 __uint128_t total_combinations = 0;
 mutex progress_mutex;
 chrono::time_point<chrono::high_resolution_clock> tStart;
@@ -296,63 +297,74 @@ inline void prepareRipemdBlock(const uint8_t* dataSrc, uint8_t* outBlock) {
 
 static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
                                          uint8_t hashResults[][20]) {
+  if (numKeys <= 0) {
+    return;
+  }
+
   alignas(32) array<array<uint8_t, 64>, HASH_BATCH_SIZE> shaInputs;
   alignas(32) array<array<uint8_t, 32>, HASH_BATCH_SIZE> shaOutputs;
   alignas(32) array<array<uint8_t, 64>, HASH_BATCH_SIZE> ripemdInputs;
   alignas(32) array<array<uint8_t, 20>, HASH_BATCH_SIZE> ripemdOutputs;
-  const __uint128_t totalBatches = (numKeys + (HASH_BATCH_SIZE - 1)) / HASH_BATCH_SIZE;
-  for (__uint128_t batch = 0; batch < totalBatches; batch++) {
-    const __uint128_t batchCount =
-        std::min<__uint128_t>(HASH_BATCH_SIZE, numKeys - batch * HASH_BATCH_SIZE);
+  array<const uint8_t*, HASH_BATCH_SIZE> shaInPtrs;
+  array<uint8_t*, HASH_BATCH_SIZE> shaOutPtrs;
+  array<const uint8_t*, HASH_BATCH_SIZE> ripemdInPtrs;
+  array<uint8_t*, HASH_BATCH_SIZE> ripemdOutPtrs;
 
-    for (__uint128_t i = 0; i < batchCount; i++) {
-      prepareShaBlock(pubKeys[batch * HASH_BATCH_SIZE + i], 33, shaInputs[i].data());
+  const int totalBatches = (numKeys + (HASH_BATCH_SIZE - 1)) / HASH_BATCH_SIZE;
+  for (int batch = 0; batch < totalBatches; ++batch) {
+    const int batchOffset = batch * HASH_BATCH_SIZE;
+    const int batchCount = std::min(HASH_BATCH_SIZE, numKeys - batchOffset);
+    if (batchCount <= 0) {
+      continue;
+    }
+
+    for (int i = 0; i < batchCount; ++i) {
+      prepareShaBlock(pubKeys[batchOffset + i], 33, shaInputs[i].data());
     }
 
     if (batchCount < HASH_BATCH_SIZE) {
-      static array<uint8_t, 64> shaPadding = {};
-      prepareShaBlock(pubKeys[0], 33, shaPadding.data());
-      for (__uint128_t i = batchCount; i < HASH_BATCH_SIZE; i++) {
-        std::memcpy(shaInputs[i].data(), shaPadding.data(), 64);
+      const auto& templateBlock = shaInputs[batchCount - 1];
+      for (int i = batchCount; i < HASH_BATCH_SIZE; ++i) {
+        std::memcpy(shaInputs[i].data(), templateBlock.data(), templateBlock.size());
       }
     }
 
-    const uint8_t* inPtr[HASH_BATCH_SIZE];
-    uint8_t* outPtr[HASH_BATCH_SIZE];
-    for (int i = 0; i < HASH_BATCH_SIZE; i++) {
-      inPtr[i] = shaInputs[i].data();
-      outPtr[i] = shaOutputs[i].data();
+    for (int i = 0; i < HASH_BATCH_SIZE; ++i) {
+      shaInPtrs[i] = shaInputs[i].data();
+      shaOutPtrs[i] = shaOutputs[i].data();
     }
 
-    sha256avx2_8B(inPtr[0], inPtr[1], inPtr[2], inPtr[3], inPtr[4], inPtr[5], inPtr[6], inPtr[7],
-                  outPtr[0], outPtr[1], outPtr[2], outPtr[3], outPtr[4], outPtr[5], outPtr[6],
-                  outPtr[7]);
+    sha256avx2_8B(shaInPtrs[0], shaInPtrs[1], shaInPtrs[2], shaInPtrs[3], shaInPtrs[4],
+                  shaInPtrs[5], shaInPtrs[6], shaInPtrs[7], shaOutPtrs[0], shaOutPtrs[1],
+                  shaOutPtrs[2], shaOutPtrs[3], shaOutPtrs[4], shaOutPtrs[5], shaOutPtrs[6],
+                  shaOutPtrs[7]);
 
-    for (__uint128_t i = 0; i < batchCount; i++) {
+    for (int i = 0; i < batchCount; ++i) {
       prepareRipemdBlock(shaOutputs[i].data(), ripemdInputs[i].data());
     }
 
     if (batchCount < HASH_BATCH_SIZE) {
-      static array<uint8_t, 64> ripemdPadding = {};
-      prepareRipemdBlock(shaOutputs[0].data(), ripemdPadding.data());
-      for (__uint128_t i = batchCount; i < HASH_BATCH_SIZE; i++) {
-        std::memcpy(ripemdInputs[i].data(), ripemdPadding.data(), 64);
+      const auto& templateBlock = ripemdInputs[batchCount - 1];
+      for (int i = batchCount; i < HASH_BATCH_SIZE; ++i) {
+        std::memcpy(ripemdInputs[i].data(), templateBlock.data(), templateBlock.size());
       }
     }
 
-    for (int i = 0; i < HASH_BATCH_SIZE; i++) {
-      inPtr[i] = ripemdInputs[i].data();
-      outPtr[i] = ripemdOutputs[i].data();
+    for (int i = 0; i < HASH_BATCH_SIZE; ++i) {
+      ripemdInPtrs[i] = ripemdInputs[i].data();
+      ripemdOutPtrs[i] = ripemdOutputs[i].data();
     }
 
     ripemd160avx2::ripemd160avx2_32(
-        (unsigned char*)inPtr[0], (unsigned char*)inPtr[1], (unsigned char*)inPtr[2],
-        (unsigned char*)inPtr[3], (unsigned char*)inPtr[4], (unsigned char*)inPtr[5],
-        (unsigned char*)inPtr[6], (unsigned char*)inPtr[7], outPtr[0], outPtr[1], outPtr[2],
-        outPtr[3], outPtr[4], outPtr[5], outPtr[6], outPtr[7]);
+        (unsigned char*)ripemdInPtrs[0], (unsigned char*)ripemdInPtrs[1],
+        (unsigned char*)ripemdInPtrs[2], (unsigned char*)ripemdInPtrs[3],
+        (unsigned char*)ripemdInPtrs[4], (unsigned char*)ripemdInPtrs[5],
+        (unsigned char*)ripemdInPtrs[6], (unsigned char*)ripemdInPtrs[7], ripemdOutPtrs[0],
+        ripemdOutPtrs[1], ripemdOutPtrs[2], ripemdOutPtrs[3], ripemdOutPtrs[4],
+        ripemdOutPtrs[5], ripemdOutPtrs[6], ripemdOutPtrs[7]);
 
-    for (__uint128_t i = 0; i < batchCount; i++) {
-      std::memcpy(hashResults[batch * HASH_BATCH_SIZE + i], ripemdOutputs[i].data(), 20);
+    for (int i = 0; i < batchCount; ++i) {
+      std::memcpy(hashResults[batchOffset + i], ripemdOutputs[i].data(), 20);
     }
   }
 }
@@ -361,26 +373,29 @@ void progressReporter(__uint128_t total_work) {
   while (!progress_stop.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     auto now = chrono::high_resolution_clock::now();
-    __uint128_t processed = total_processed.load();
-    long double processedLD = to_long_double(processed);
+    __uint128_t processedCombos = total_processed_combos.load();
+    __uint128_t processedKeys = total_processed_keys.load();
+    long double processedCombosLD = to_long_double(processedCombos);
+    long double processedKeysLD = to_long_double(processedKeys);
     long double totalLD = to_long_double(total_work);
     double progress = 0.0;
     if (totalLD > 0.0L) {
-      long double ratio = processedLD / totalLD * 100.0L;
+      long double ratio = processedCombosLD / totalLD * 100.0L;
       progress = static_cast<double>(std::min<long double>(ratio, 100.0L));
     }
 
     double elapsed = chrono::duration<double>(now - tStart).count();
     double avgSpeed = 0.0;
     if (elapsed > 0.0) {
-      avgSpeed = static_cast<double>((processedLD / 1e6L) / elapsed);
+      avgSpeed = static_cast<double>((processedKeysLD / 1e6L) / elapsed);
     }
 
     {
       lock_guard<mutex> lock(progress_mutex);
       moveCursorTo(0, 10);
       cout << "Progress: " << fixed << setprecision(6) << progress << "%\n";
-      cout << "Processed: " << to_string_128(processed) << "\n";
+      cout << "Processed combinations: " << to_string_128(processedCombos) << "\n";
+      cout << "Processed keys: " << to_string_128(processedKeys) << "\n";
       cout << "Speed: " << fixed << setprecision(2) << avgSpeed << " Mkeys/s\n";
       cout << "Elapsed Time: " << formatElapsedTime(elapsed) << "\n";
       cout.flush();
@@ -392,25 +407,28 @@ void progressReporter(__uint128_t total_work) {
   }
 
   auto now = chrono::high_resolution_clock::now();
-  __uint128_t processed = total_processed.load();
-  long double processedLD = to_long_double(processed);
+  __uint128_t processedCombos = total_processed_combos.load();
+  __uint128_t processedKeys = total_processed_keys.load();
+  long double processedCombosLD = to_long_double(processedCombos);
+  long double processedKeysLD = to_long_double(processedKeys);
   long double totalLD = to_long_double(total_work);
   double progress = 0.0;
   if (totalLD > 0.0L) {
-    long double ratio = processedLD / totalLD * 100.0L;
+    long double ratio = processedCombosLD / totalLD * 100.0L;
     progress = static_cast<double>(std::min<long double>(ratio, 100.0L));
   }
   double elapsed = chrono::duration<double>(now - tStart).count();
   double avgSpeed = 0.0;
   if (elapsed > 0.0) {
-    avgSpeed = static_cast<double>((processedLD / 1e6L) / elapsed);
+    avgSpeed = static_cast<double>((processedKeysLD / 1e6L) / elapsed);
   }
 
   {
     lock_guard<mutex> lock(progress_mutex);
     moveCursorTo(0, 10);
     cout << "Progress: " << fixed << setprecision(6) << progress << "%\n";
-    cout << "Processed: " << to_string_128(processed) << "\n";
+    cout << "Processed combinations: " << to_string_128(processedCombos) << "\n";
+    cout << "Processed keys: " << to_string_128(processedKeys) << "\n";
     cout << "Speed: " << fixed << setprecision(2) << avgSpeed << " Mkeys/s\n";
     cout << "Elapsed Time: " << formatElapsedTime(elapsed) << "\n";
     cout.flush();
@@ -456,6 +474,7 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
   __uint128_t currentIndex = start;
   uint64_t localComboCount = 0;
+  uint64_t localKeyCount = 0;
 
   while (!stop_event.load() && currentIndex < end) {
     Int currentKey;
@@ -548,6 +567,11 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
       if (localBatchCount == HASH_BATCH_SIZE) {
         computeHash160BatchBinSingle(localBatchCount, localPubKeys, localHashResults);
+        localKeyCount += localBatchCount;
+        if (localKeyCount >= 8192) {
+          total_processed_keys.add(localKeyCount);
+          localKeyCount = 0;
+        }
 
         for (int j = 0; j < HASH_BATCH_SIZE; j++) {
           __m256i cand =
@@ -567,9 +591,11 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
             if (fullMatch) {
               localComboCount++;
-              total_processed.add(localComboCount);
-              __uint128_t processedSnapshot = total_processed.load();
+              total_processed_combos.add(localComboCount);
+              total_processed_keys.add(localKeyCount);
+              __uint128_t processedSnapshot = total_processed_combos.load();
               localComboCount = 0;
+              localKeyCount = 0;
 
               Int foundKey;
               foundKey.Set(&currentKey);
@@ -607,6 +633,11 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
     if (localBatchCount > 0) {
       computeHash160BatchBinSingle(localBatchCount, localPubKeys, localHashResults);
+      localKeyCount += localBatchCount;
+      if (localKeyCount >= 8192) {
+        total_processed_keys.add(localKeyCount);
+        localKeyCount = 0;
+      }
       for (int j = 0; j < localBatchCount; j++) {
         __m256i cand =
             _mm256_loadu_si256(reinterpret_cast<const __m256i*>(localHashResults[j]));
@@ -622,9 +653,11 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
           }
           if (fullMatch) {
             localComboCount++;
-            total_processed.add(localComboCount);
-            __uint128_t processedSnapshot = total_processed.load();
+            total_processed_combos.add(localComboCount);
+            total_processed_keys.add(localKeyCount);
+            __uint128_t processedSnapshot = total_processed_combos.load();
             localComboCount = 0;
+            localKeyCount = 0;
 
             Int foundKey;
             foundKey.Set(&currentKey);
@@ -656,7 +689,7 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
     localComboCount++;
     if (localComboCount >= 4096) {
-      total_processed.add(localComboCount);
+      total_processed_combos.add(localComboCount);
       localComboCount = 0;
     }
 
@@ -670,7 +703,10 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
   }
 
   if (localComboCount > 0) {
-    total_processed.add(localComboCount);
+    total_processed_combos.add(localComboCount);
+  }
+  if (localKeyCount > 0) {
+    total_processed_keys.add(localKeyCount);
   }
 }
 
@@ -689,7 +725,8 @@ int main(int argc, char* argv[]) {
   signal(SIGINT, signalHandler);
   stop_event.store(false);
   progress_stop.store(false);
-  total_processed.reset();
+  total_processed_combos.reset();
+  total_processed_keys.reset();
   {
     lock_guard<mutex> lock(result_mutex);
     results = {};
@@ -835,11 +872,13 @@ int main(int argc, char* argv[]) {
 
   auto finishTime = chrono::high_resolution_clock::now();
   double elapsed = chrono::duration<double>(finishTime - tStart).count();
-  __uint128_t processed = total_processed.load();
-  long double processedLD = to_long_double(processed);
+  __uint128_t processedCombos = total_processed_combos.load();
+  __uint128_t processedKeys = total_processed_keys.load();
+  long double processedCombosLD = to_long_double(processedCombos);
+  long double processedKeysLD = to_long_double(processedKeys);
   double avgSpeed = 0.0;
   if (elapsed > 0.0) {
-    avgSpeed = static_cast<double>((processedLD / 1e6L) / elapsed);
+    avgSpeed = static_cast<double>((processedKeysLD / 1e6L) / elapsed);
   }
 
   tuple<string, __uint128_t, int> solution;
@@ -853,7 +892,7 @@ int main(int argc, char* argv[]) {
   }
 
   if (hasSolution) {
-    auto [hex_key, checked, flips] = solution;
+    auto [hex_key, checkedCombos, flips] = solution;
     string compactHex = hex_key;
     size_t firstNonZeroCompact = compactHex.find_first_not_of('0');
 
@@ -868,7 +907,7 @@ int main(int argc, char* argv[]) {
     cout << "=========== SOLUTION FOUND ============\n";
     cout << "=======================================\n";
     cout << "Private key: " << compactHex << "\n";
-    cout << "Checked " << to_string_128(checked) << " combinations\n";
+    cout << "Checked " << to_string_128(checkedCombos) << " combinations\n";
     cout << "Bit flips: " << flips << endl;
     cout << "Time: " << fixed << setprecision(2) << elapsed << " seconds ("
          << formatElapsedTime(elapsed) << ")\n";
@@ -883,7 +922,7 @@ int main(int argc, char* argv[]) {
       cerr << "Failed to save solution to file!\n";
     }
   } else {
-    cout << "\n\nNo solution found. Checked " << to_string_128(processed) << " combinations\n";
+    cout << "\n\nNo solution found. Checked " << to_string_128(processedCombos) << " combinations\n";
     cout << "Time: " << fixed << setprecision(2) << elapsed << " seconds ("
          << formatElapsedTime(elapsed) << ")\n";
     cout << "Speed: " << fixed << setprecision(2) << avgSpeed << " Mkeys/s\n";
