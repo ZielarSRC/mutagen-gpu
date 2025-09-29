@@ -1,88 +1,130 @@
-# Makefile — fixed tabs and formatting (Linux + Windows)
-# Build: make            (Linux)
-#        mingw32-make    (Windows / MSYS2)
-
 # Detect OS
 UNAME_S := $(shell uname -s)
 
-# Enable static linking by default (Windows only toggle below)
+# Enable static linking by default (change to 'no' to use dynamic linking)
 STATIC_LINKING = yes
 
-# ---------------- Linux ----------------
+# Compiler settings based on OS
 ifeq ($(UNAME_S),Linux)
+# Linux settings
 
-CXX := g++
+# Compiler
+CXX = g++
+NVCC_BIN := $(shell command -v nvcc 2>/dev/null)
 
-CXXFLAGS := -m64 -std=c++20 -Ofast -mssse3 -Wall -Wextra \
-            -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
-            -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
-            -Wno-unused-but-set-variable \
-            -funroll-loops -ftree-vectorize -fstrict-aliasing -fno-semantic-interposition \
-            -fvect-cost-model=unlimited -fno-trapping-math -fipa-ra -flto \
-            -fassociative-math -fopenmp -mavx2 -mbmi2 -madx -fwrapv
+# Compiler flags
+CXXFLAGS = -m64 -std=c++20 -Ofast -mssse3 -Wall -Wextra \
+           -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
+           -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
+           -Wno-unused-but-set-variable \
+           -funroll-loops -ftree-vectorize -fstrict-aliasing -fno-semantic-interposition \
+           -fvect-cost-model=unlimited -fno-trapping-math -fipa-ra -flto \
+           -fassociative-math -fopenmp -mavx2 -mbmi2 -madx -fwrapv
 
-SRCS := mutagen.cpp SECP256K1.cpp Int.cpp IntGroup.cpp IntMod.cpp \
-        Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp
+LDFLAGS =
 
-OBJS := $(SRCS:.cpp=.o)
+# Source files
+SRCS = mutagen.cpp SECP256K1.cpp Int.cpp IntGroup.cpp IntMod.cpp \
+       Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp gpu_hash160_stub.cpp
 
-TARGET := mutagen
+ifneq ($(NVCC_BIN),)
+CXXFLAGS += -DHAVE_CUDA
+LDFLAGS += -lcudart
+CUDA_SRCS = gpu_hash160.cu
+CUDA_OBJS = $(CUDA_SRCS:.cu=.o)
+OBJS = $(SRCS:.cpp=.o) $(CUDA_OBJS)
+NVCC = $(NVCC_BIN)
+else
+# Object files
+OBJS = $(SRCS:.cpp=.o)
+endif
 
-all: $(TARGET)
+# Target executable
+TARGET = mutagen
 
+
+# Link the object files to create the executable and then delete .o files
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
-	@chmod +x $(TARGET)
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
+	rm -f $(OBJS) && chmod +x $(TARGET)
 
+# Compile each source file into an object file
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+ifneq ($(NVCC_BIN),)
+CUDA_ARCH ?= sm_61
+NVCCFLAGS = -std=c++17 -O3 -arch=$(CUDA_ARCH)
+
+%.o: %.cu
+	$(NVCC) $(NVCCFLAGS) -DHAVE_CUDA -c $< -o $@
+endif
+
+# Clean up build files
 clean:
 	@echo "Cleaning..."
-	@rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET)
 
-.PHONY: all clean
+# Phony targets
+.PHONY: all clean 
 
 else
+# Windows settings (MinGW-w64)
 
-# ---------------- Windows (MinGW-w64) ----------------
-CXX := g++
+# Compiler
+CXX = g++
 
-# Try to hint MSYS path if g++ not in PATH (informational only)
-CHECK_COMPILER := $(shell which $(CXX) 2>NUL)
+# Check if compiler is found
+CHECK_COMPILER := $(shell which $(CXX))
 
-CXXFLAGS := -m64 -std=c++20 -Ofast -mssse3 -Wall -Wextra \
-            -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
-            -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
-            -Wno-unused-but-set-variable -funroll-loops -ftree-vectorize \
-            -fstrict-aliasing -fno-semantic-interposition -fvect-cost-model=unlimited \
-            -fno-trapping-math -fipa-ra -fassociative-math -fopenmp \
-            -mavx2 -mbmi2 -madx -fwrapv
-
-ifeq ($(STATIC_LINKING),yes)
-CXXFLAGS += -static -static-libgcc -static-libstdc++
+# Add MSYS path if the compiler is not found
+ifeq ($(CHECK_COMPILER),)
+  $(info Compiler not found. Adding MSYS path to the environment...)
+  SHELL := powershell
+  PATH := C:\msys64\mingw64\bin;$(PATH)
 endif
 
-SRCS := mutagen.cpp SECP256K1.cpp Int.cpp IntGroup.cpp IntMod.cpp \
-        Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp
+# Compiler flags (without LTO)
+CXXFLAGS = -m64 -std=c++20 -Ofast -mssse3 -Wall -Wextra \
+           -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
+           -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
+           -Wno-unused-but-set-variable -funroll-loops -ftree-vectorize \
+           -fstrict-aliasing -fno-semantic-interposition -fvect-cost-model=unlimited \
+           -fno-trapping-math -fipa-ra -fassociative-math -fopenmp \
+           -mavx2 -mbmi2 -madx -fwrapv
 
-OBJS := $(SRCS:.cpp=.o)
+# Add -static flag if STATIC_LINKING is enabled
+ifeq ($(STATIC_LINKING), yes)
+    CXXFLAGS += -static
+else
+    $(info Dynamic linking will be used. Ensure required DLLs are distributed)
+endif
 
-TARGET := mutagen.exe
+# Source files
+SRCS = mutagen.cpp SECP256K1.cpp Int.cpp IntGroup.cpp IntMod.cpp \
+       Point.cpp ripemd160_avx2.cpp sha256_avx2.cpp gpu_hash160_stub.cpp
 
+# Object files
+OBJS = $(SRCS:.cpp=.o)
+
+# Target executable
+TARGET = mutagen.exe
+
+# Default target
 all: $(TARGET)
 
+# Link the object files to create the executable
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
-	-del /q $(OBJS) 2>NUL || exit 0
+	del /q $(OBJS)
 
+# Compile each source file into an object file
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# Clean up build files
 clean:
 	@echo Cleaning...
-	-del /q $(OBJS) $(TARGET) 2>NUL || exit 0
+	del /q $(OBJS) $(TARGET)
 
-.PHONY: all clean
-
-endif
+# Phony targets
