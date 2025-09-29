@@ -33,6 +33,7 @@
 #include "SECP256K1.h"
 #include "ripemd160_avx2.h"
 #include "sha256_avx2.h"
+#include "gpu_hash160.h"
 
 using namespace std;
 
@@ -76,6 +77,7 @@ int WORKERS = omp_get_num_procs();
 int FLIP_COUNT = -1;
 static constexpr int POINTS_BATCH_SIZE = 256;
 static constexpr int HASH_BATCH_SIZE = 8;
+static constexpr int GPU_HASH_CHUNK = POINTS_BATCH_SIZE * 2;
 
 const unordered_map<int, tuple<int, string, string>> PUZZLE_DATA = {
     {20, {8, "b907c3a2a3b27789dfb509b730dd47703c272868", "357535"}},
@@ -138,6 +140,8 @@ Int BASE_KEY;
 atomic<bool> stop_event(false);
 mutex result_mutex;
 queue<tuple<string, __uint128_t, int>> results;
+atomic<bool> gpu_hash_enabled(false);
+atomic<bool> gpu_error_reported(false);
 
 struct AtomicUint128 {
   std::atomic<uint64_t> low;
@@ -303,6 +307,18 @@ static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
     return;
   }
 
+  if (gpu_hash_enabled.load(std::memory_order_relaxed)) {
+    const uint8_t* in_ptr = reinterpret_cast<const uint8_t*>(pubKeys);
+    uint8_t* out_ptr = reinterpret_cast<uint8_t*>(hashResults);
+    if (gpu_hash160_hash(in_ptr, static_cast<size_t>(numKeys), out_ptr)) {
+      return;
+    }
+    gpu_hash_enabled.store(false, std::memory_order_relaxed);
+    if (!gpu_error_reported.exchange(true)) {
+      cerr << "CUDA hashing backend reported an error. Falling back to CPU implementation.\n";
+    }
+  }
+
   alignas(32) array<array<uint8_t, 64>, HASH_BATCH_SIZE> shaInputs;
   alignas(32) array<array<uint8_t, 32>, HASH_BATCH_SIZE> shaOutputs;
   alignas(32) array<array<uint8_t, 64>, HASH_BATCH_SIZE> ripemdInputs;
@@ -445,9 +461,9 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
   }
 
   const int fullBatchSize = 2 * POINTS_BATCH_SIZE;
-  alignas(32) uint8_t localPubKeys[HASH_BATCH_SIZE][33];
-  alignas(32) uint8_t localHashResults[HASH_BATCH_SIZE][20];
-  alignas(32) int pointIndices[HASH_BATCH_SIZE];
+  alignas(32) uint8_t localPubKeys[GPU_HASH_CHUNK][33];
+  alignas(32) uint8_t localHashResults[GPU_HASH_CHUNK][20];
+  alignas(32) int pointIndices[GPU_HASH_CHUNK];
 
   __m256i target16 =
       _mm256_load_si256(reinterpret_cast<const __m256i*>(TARGET_HASH160_PADDED.data()));
@@ -551,88 +567,31 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
       pointBatchY[POINTS_BATCH_SIZE + i].ModAdd(&diffX);
     }
 
+    bool prefer_gpu = gpu_hash_enabled.load(std::memory_order_relaxed);
     int localBatchCount = 0;
-    for (int i = 0; i < fullBatchSize && !stop_event.load(); i++) {
-      localPubKeys[localBatchCount][0] = pointBatchY[i].IsEven() ? 0x02 : 0x03;
-      for (int j = 0; j < 32; j++) {
-        localPubKeys[localBatchCount][1 + j] = pointBatchX[i].GetByte(31 - j);
+    int cpuBatchStart = 0;
+
+    auto processRange = [&](int start, int count) -> bool {
+      if (count <= 0) {
+        return false;
       }
-      pointIndices[localBatchCount] = i;
-      localBatchCount++;
 
-      if (localBatchCount == HASH_BATCH_SIZE) {
-        computeHash160BatchBinSingle(localBatchCount, localPubKeys, localHashResults);
-        localKeyCount += localBatchCount;
-        if (localKeyCount >= 8192) {
-          total_processed_keys.add(localKeyCount);
-          localKeyCount = 0;
-        }
-
-        for (int j = 0; j < HASH_BATCH_SIZE; j++) {
-          __m256i cand =
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(localHashResults[j]));
-
-          __m256i cmp = _mm256_cmpeq_epi8(cand, target16);
-          int mask = _mm256_movemask_epi8(cmp);
-
-          if ((mask & 0x0F) == 0x0F) {
-            if (std::memcmp(localHashResults[j], TARGET_HASH160_RAW.data(),
-                            TARGET_HASH160_RAW.size()) == 0) {
-              localComboCount++;
-              total_processed_combos.add(localComboCount);
-              total_processed_keys.add(localKeyCount);
-              __uint128_t processedSnapshot = total_processed_combos.load();
-              localComboCount = 0;
-              localKeyCount = 0;
-
-              Int foundKey;
-              foundKey.Set(&currentKey);
-              int idx = pointIndices[j];
-              if (idx < 256) {
-                Int offset;
-                offset.SetInt32(idx);
-                foundKey.Add(&offset);
-              } else {
-                Int offset;
-                offset.SetInt32(idx - 256);
-                foundKey.Sub(&offset);
-              }
-
-              string hexKey = foundKey.GetBase16();
-              hexKey = string(64 - hexKey.length(), '0') + hexKey;
-
-              {
-                lock_guard<mutex> lock(result_mutex);
-                results.push(make_tuple(hexKey, processedSnapshot, flip_count));
-              }
-              stop_event.store(true);
-              return;
-            }
-          }
-        }
-
-        localBatchCount = 0;
-      }
-    }
-
-    if (stop_event.load()) {
-      break;
-    }
-
-    if (localBatchCount > 0) {
-      computeHash160BatchBinSingle(localBatchCount, localPubKeys, localHashResults);
-      localKeyCount += localBatchCount;
+      computeHash160BatchBinSingle(count, &localPubKeys[start], &localHashResults[start]);
+      localKeyCount += count;
       if (localKeyCount >= 8192) {
         total_processed_keys.add(localKeyCount);
         localKeyCount = 0;
       }
-      for (int j = 0; j < localBatchCount; j++) {
+
+      for (int j = 0; j < count; ++j) {
+        int idx = start + j;
         __m256i cand =
-            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(localHashResults[j]));
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(localHashResults[idx]));
         __m256i cmp = _mm256_cmpeq_epi8(cand, target16);
         int mask = _mm256_movemask_epi8(cmp);
+
         if ((mask & 0x0F) == 0x0F) {
-          if (std::memcmp(localHashResults[j], TARGET_HASH160_RAW.data(),
+          if (std::memcmp(localHashResults[idx], TARGET_HASH160_RAW.data(),
                           TARGET_HASH160_RAW.size()) == 0) {
             localComboCount++;
             total_processed_combos.add(localComboCount);
@@ -643,14 +602,14 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
             Int foundKey;
             foundKey.Set(&currentKey);
-            int idx = pointIndices[j];
-            if (idx < 256) {
+            int pointIdx = pointIndices[idx];
+            if (pointIdx < POINTS_BATCH_SIZE) {
               Int offset;
-              offset.SetInt32(idx);
+              offset.SetInt32(pointIdx);
               foundKey.Add(&offset);
             } else {
               Int offset;
-              offset.SetInt32(idx - 256);
+              offset.SetInt32(pointIdx - POINTS_BATCH_SIZE);
               foundKey.Sub(&offset);
             }
 
@@ -662,11 +621,42 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
               results.push(make_tuple(hexKey, processedSnapshot, flip_count));
             }
             stop_event.store(true);
-            return;
+            return true;
           }
         }
       }
-      localBatchCount = 0;
+      return false;
+    };
+
+    for (int i = 0; i < fullBatchSize && !stop_event.load(); i++) {
+      localPubKeys[localBatchCount][0] = pointBatchY[i].IsEven() ? 0x02 : 0x03;
+      for (int j = 0; j < 32; j++) {
+        localPubKeys[localBatchCount][1 + j] = pointBatchX[i].GetByte(31 - j);
+      }
+      pointIndices[localBatchCount] = i;
+      localBatchCount++;
+
+      if (!prefer_gpu && localBatchCount - cpuBatchStart == HASH_BATCH_SIZE) {
+        if (processRange(cpuBatchStart, HASH_BATCH_SIZE)) {
+          return;
+        }
+        cpuBatchStart += HASH_BATCH_SIZE;
+      }
+    }
+
+    if (stop_event.load()) {
+      break;
+    }
+
+    bool gpuActive = prefer_gpu && gpu_hash_enabled.load(std::memory_order_relaxed);
+    if (gpuActive) {
+      if (processRange(0, localBatchCount)) {
+        return;
+      }
+    } else if (localBatchCount - cpuBatchStart > 0) {
+      if (processRange(cpuBatchStart, localBatchCount - cpuBatchStart)) {
+        return;
+      }
     }
 
     localComboCount++;
@@ -713,6 +703,8 @@ int main(int argc, char* argv[]) {
     lock_guard<mutex> lock(result_mutex);
     results = {};
   }
+  gpu_hash_enabled.store(false);
+  gpu_error_reported.store(false);
 
   int opt;
   int option_index = 0;
@@ -760,6 +752,9 @@ int main(int argc, char* argv[]) {
 
   Secp256K1 secp;
   secp.Init();
+
+  bool cudaAvailable = gpu_hash160_is_available();
+  gpu_hash_enabled.store(cudaAvailable);
 
   auto puzzle_it = PUZZLE_DATA.find(PUZZLE_NUM);
   if (puzzle_it == PUZZLE_DATA.end()) {
@@ -819,6 +814,13 @@ int main(int argc, char* argv[]) {
   cout << "Flip count: " << FLIP_COUNT << " ";
   if (FLIP_COUNT != DEFAULT_FLIP_COUNT) {
     cout << "(override, default was " << DEFAULT_FLIP_COUNT << ")";
+  }
+  cout << "\n";
+  cout << "CUDA hashing: ";
+  if (cudaAvailable) {
+    cout << "enabled (NVIDIA GPU detected)";
+  } else {
+    cout << "disabled (using CPU implementation)";
   }
   cout << "\n";
 
