@@ -21,6 +21,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include <stop_token>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -131,6 +132,7 @@ const unordered_map<int, tuple<int, string, string>> PUZZLE_DATA = {
     {71, {29, "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8", "970436974005023690481"}}};
 
 vector<unsigned char> TARGET_HASH160_RAW(20);
+alignas(32) array<uint8_t, 32> TARGET_HASH160_PADDED{};
 string TARGET_HASH160;
 Int BASE_KEY;
 atomic<bool> stop_event(false);
@@ -369,8 +371,8 @@ static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
   }
 }
 
-void progressReporter(__uint128_t total_work) {
-  while (!progress_stop.load()) {
+void progressReporter(std::stop_token stopToken, __uint128_t total_work) {
+  while (!progress_stop.load() && !stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     auto now = chrono::high_resolution_clock::now();
     __uint128_t processedCombos = total_processed_combos.load();
@@ -448,7 +450,7 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
   alignas(32) int pointIndices[HASH_BATCH_SIZE];
 
   __m256i target16 =
-      _mm256_loadu_si256(reinterpret_cast<const __m256i*>(TARGET_HASH160_RAW.data()));
+      _mm256_load_si256(reinterpret_cast<const __m256i*>(TARGET_HASH160_PADDED.data()));
 
   alignas(32) Point plusPoints[POINTS_BATCH_SIZE];
   alignas(32) Point minusPoints[POINTS_BATCH_SIZE];
@@ -482,10 +484,7 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
     const vector<int>& flips = gen.get();
     for (int pos : flips) {
-      Int mask;
-      mask.SetInt32(1);
-      mask.ShiftL(pos);
-      currentKey.Xor(&mask);
+      currentKey.SwapBit(pos);
     }
 
     Point startPoint = secp->ComputePublicKey(&currentKey);
@@ -554,11 +553,7 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
 
     int localBatchCount = 0;
     for (int i = 0; i < fullBatchSize && !stop_event.load(); i++) {
-      Point tempPoint;
-      tempPoint.x.Set(&pointBatchX[i]);
-      tempPoint.y.Set(&pointBatchY[i]);
-
-      localPubKeys[localBatchCount][0] = tempPoint.y.IsEven() ? 0x02 : 0x03;
+      localPubKeys[localBatchCount][0] = pointBatchY[i].IsEven() ? 0x02 : 0x03;
       for (int j = 0; j < 32; j++) {
         localPubKeys[localBatchCount][1 + j] = pointBatchX[i].GetByte(31 - j);
       }
@@ -581,15 +576,8 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
           int mask = _mm256_movemask_epi8(cmp);
 
           if ((mask & 0x0F) == 0x0F) {
-            bool fullMatch = true;
-            for (int k = 0; k < 20; k++) {
-              if (localHashResults[j][k] != TARGET_HASH160_RAW[k]) {
-                fullMatch = false;
-                break;
-              }
-            }
-
-            if (fullMatch) {
+            if (std::memcmp(localHashResults[j], TARGET_HASH160_RAW.data(),
+                            TARGET_HASH160_RAW.size()) == 0) {
               localComboCount++;
               total_processed_combos.add(localComboCount);
               total_processed_keys.add(localKeyCount);
@@ -644,14 +632,8 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uin
         __m256i cmp = _mm256_cmpeq_epi8(cand, target16);
         int mask = _mm256_movemask_epi8(cmp);
         if ((mask & 0x0F) == 0x0F) {
-          bool fullMatch = true;
-          for (int k = 0; k < 20; k++) {
-            if (localHashResults[j][k] != TARGET_HASH160_RAW[k]) {
-              fullMatch = false;
-              break;
-            }
-          }
-          if (fullMatch) {
+          if (std::memcmp(localHashResults[j], TARGET_HASH160_RAW.data(),
+                          TARGET_HASH160_RAW.size()) == 0) {
             localComboCount++;
             total_processed_combos.add(localComboCount);
             total_processed_keys.add(localKeyCount);
@@ -792,9 +774,13 @@ int main(int argc, char* argv[]) {
   }
 
   TARGET_HASH160 = TARGET_HASH160_HEX;
+  std::fill(TARGET_HASH160_PADDED.begin(), TARGET_HASH160_PADDED.end(), 0);
 
-  for (int i = 0; i < 20; i++) {
-    TARGET_HASH160_RAW[i] = stoul(TARGET_HASH160.substr(i * 2, 2), nullptr, 16);
+  for (size_t i = 0; i < TARGET_HASH160_RAW.size(); i++) {
+    auto byteValue = static_cast<unsigned char>(
+        stoul(TARGET_HASH160.substr(i * 2, 2), nullptr, 16));
+    TARGET_HASH160_RAW[i] = byteValue;
+    TARGET_HASH160_PADDED[i] = byteValue;
   }
 
   BASE_KEY.SetBase10(const_cast<char*>(PRIVATE_KEY_DECIMAL.c_str()));
@@ -843,7 +829,7 @@ int main(int argc, char* argv[]) {
   cout << "Using: " << WORKERS << " threads\n";
   cout << "\n";
 
-  thread progressThread(progressReporter, total_combinations);
+  std::jthread progressThread(progressReporter, total_combinations);
 
   vector<thread> threads;
   threads.reserve(WORKERS);
@@ -866,9 +852,8 @@ int main(int argc, char* argv[]) {
   }
 
   progress_stop.store(true);
-  if (progressThread.joinable()) {
-    progressThread.join();
-  }
+  progressThread.request_stop();
+  progressThread.join();
 
   auto finishTime = chrono::high_resolution_clock::now();
   double elapsed = chrono::duration<double>(finishTime - tStart).count();
