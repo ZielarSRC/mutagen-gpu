@@ -12,7 +12,7 @@ ifeq ($(UNAME_S),Linux)
 CXX = g++
 
 # Compiler flags
-CXXFLAGS = -m64 -std=c++17 -Ofast -mssse3 -Wall -Wextra \
+CXXFLAGS = -m64 -std=c++20 -Ofast -mssse3 -Wall -Wextra \
            -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
            -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
            -Wno-unused-but-set-variable \
@@ -33,20 +33,20 @@ TARGET = mutagen
 
 # Link the object files to create the executable and then delete .o files
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
-	rm -f $(OBJS) && chmod +x $(TARGET)
+        $(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
+        rm -f $(OBJS) && chmod +x $(TARGET)
 
 # Compile each source file into an object file
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+        $(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean up build files
 clean:
-	@echo "Cleaning..."
-	rm -f $(OBJS) $(TARGET)
+        @echo "Cleaning..."
+        rm -f $(OBJS) $(TARGET)
 
 # Phony targets
-.PHONY: all clean 
+.PHONY: all clean
 
 else
 # Windows settings (MinGW-w64)
@@ -65,7 +65,7 @@ ifeq ($(CHECK_COMPILER),)
 endif
 
 # Compiler flags (without LTO)
-CXXFLAGS = -m64 -std=c++17 -Ofast -mssse3 -Wall -Wextra \
+CXXFLAGS = -m64 -std=c++20 -Ofast -mssse3 -Wall -Wextra \
            -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
            -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
            -Wno-unused-but-set-variable -funroll-loops -ftree-vectorize \
@@ -95,17 +95,17 @@ all: $(TARGET)
 
 # Link the object files to create the executable
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
-	del /q $(OBJS)
+        $(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
+        del /q $(OBJS)
 
 # Compile each source file into an object file
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+        $(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean up build files
 clean:
-	@echo Cleaning...
-	del /q $(OBJS) $(TARGET)
+        @echo Cleaning...
+        del /q $(OBJS) $(TARGET)
 
 # Phony targets
 .PHONY: all clean
