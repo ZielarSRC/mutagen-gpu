@@ -12,11 +12,13 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <queue>
 #include <random>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -32,149 +34,6 @@
 #include "sha256_avx2.h"
 
 using namespace std;
-
-// === SMART LOGGER CLASS ===
-class SmartMutagenLogger {
- private:
-  std::ofstream logFile;
-  std::mutex logMutex;
-  std::chrono::time_point<std::chrono::high_resolution_clock> startTime;
-  uint64_t combinationCounter = 0;
-  uint64_t lastLoggedCombination = 0;
-
-  std::string getCurrentTimestamp() {
-    auto now = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - startTime);
-    std::ostringstream oss;
-    oss << "[" << std::fixed << std::setprecision(6) << elapsed.count() / 1000000.0 << "s] ";
-    return oss.str();
-  }
-
- public:
-  SmartMutagenLogger(const std::string& filename = "mutagen_analysis.log")
-      : logFile(filename), startTime(std::chrono::high_resolution_clock::now()) {
-    if (logFile.is_open()) {
-      logFile << "========== MUTAGEN ALGORITHM ANALYSIS ==========" << std::endl;
-      logFile << "Start Time: " << getCurrentTimestamp() << std::endl;
-      logFile << "Purpose: Understand how bit flipping mutation works" << std::endl;
-      logFile << "=================================================" << std::endl;
-      logFile.flush();
-    }
-  }
-
-  ~SmartMutagenLogger() {
-    if (logFile.is_open()) {
-      logFile << "\n========== ANALYSIS COMPLETE ==========" << std::endl;
-      logFile.close();
-    }
-  }
-
-  void logOperation(const std::string& operation, const std::string& details = "") {
-    std::lock_guard<std::mutex> lock(logMutex);
-    if (logFile.is_open()) {
-      logFile << getCurrentTimestamp() << "[" << operation << "] " << details << std::endl;
-      logFile.flush();
-    }
-  }
-
-  void logKeyMutationStrategy(int threadId, const std::string& baseKey,
-                              const std::vector<int>& flips, const std::string& mutatedKey,
-                              uint64_t combinationIndex) {
-    std::lock_guard<std::mutex> lock(logMutex);
-    if (logFile.is_open()) {
-      logFile << "\n" << getCurrentTimestamp() << "=== KEY MUTATION STEP ===" << std::endl;
-      logFile << "Thread: " << threadId << " | Combination #" << combinationIndex << std::endl;
-      logFile << "Base Key (hex): " << baseKey << std::endl;
-      logFile << "Base Key (dec): " << std::stoull(baseKey, nullptr, 16) << std::endl;
-      logFile << "Bit positions to flip: [";
-      for (size_t i = 0; i < flips.size(); ++i) {
-        logFile << flips[i];
-        if (i < flips.size() - 1) logFile << ", ";
-      }
-      logFile << "]" << std::endl;
-      logFile << "After flipping bits: " << mutatedKey << std::endl;
-      logFile << "Mutated Key (dec): " << std::stoull(mutatedKey, nullptr, 16) << std::endl;
-
-      // Show which bits changed
-      uint64_t baseVal = std::stoull(baseKey, nullptr, 16);
-      uint64_t mutatedVal = std::stoull(mutatedKey, nullptr, 16);
-      uint64_t diff = baseVal ^ mutatedVal;
-      logFile << "XOR difference: 0x" << std::hex << diff << std::dec << std::endl;
-      logFile << "=========================" << std::endl;
-      logFile.flush();
-    }
-  }
-
-  void logAlgorithmStep(const std::string& step, const std::string& explanation) {
-    std::lock_guard<std::mutex> lock(logMutex);
-    if (logFile.is_open()) {
-      logFile << getCurrentTimestamp() << "[ALGORITHM] " << step << ": " << explanation
-              << std::endl;
-      logFile.flush();
-    }
-  }
-
-  void logCombinationGeneration(int threadId, uint64_t combinationIndex,
-                                const std::vector<int>& combination) {
-    // Only log first 10 combinations, then every 10000th, then around solution
-    bool shouldLog =
-        (combinationIndex < 10) || (combinationIndex % 10000 == 0) ||
-        (combinationIndex > lastLoggedCombination + 5000);  // Log more frequently near solution
-
-    if (shouldLog) {
-      std::lock_guard<std::mutex> lock(logMutex);
-      if (logFile.is_open()) {
-        logFile << getCurrentTimestamp() << "[COMBINATION_GEN] Thread" << threadId
-                << " | Index: " << combinationIndex << " | Bits to flip: [";
-        for (size_t i = 0; i < combination.size(); ++i) {
-          logFile << combination[i];
-          if (i < combination.size() - 1) logFile << ", ";
-        }
-        logFile << "]" << std::endl;
-        logFile.flush();
-        lastLoggedCombination = combinationIndex;
-      }
-    }
-  }
-
-  void logSolutionAnalysis(const std::string& privateKey, const std::string& hash160,
-                           uint64_t totalChecked, const std::vector<int>& solutionFlips) {
-    std::lock_guard<std::mutex> lock(logMutex);
-    if (logFile.is_open()) {
-      logFile << "\n"
-              << getCurrentTimestamp() << "========== SOLUTION ANALYSIS ==========" << std::endl;
-      logFile << "SOLUTION FOUND!" << std::endl;
-      logFile << "Private Key: " << privateKey << std::endl;
-      logFile << "Hash160: " << hash160 << std::endl;
-      logFile << "Total combinations checked: " << totalChecked << std::endl;
-      logFile << "Solution required flipping bits: [";
-      for (size_t i = 0; i < solutionFlips.size(); ++i) {
-        logFile << solutionFlips[i];
-        if (i < solutionFlips.size() - 1) logFile << ", ";
-      }
-      logFile << "]" << std::endl;
-      logFile << "=======================================" << std::endl;
-      logFile.flush();
-    }
-  }
-
-  void logProgress(uint64_t totalChecked, uint64_t totalCombinations, double speed) {
-    // Only log every 50000 combinations
-    if (totalChecked % 50000 == 0) {
-      std::lock_guard<std::mutex> lock(logMutex);
-      if (logFile.is_open()) {
-        double progress = (double)totalChecked / totalCombinations * 100.0;
-        logFile << getCurrentTimestamp() << "[PROGRESS] " << totalChecked << "/"
-                << totalCombinations << " (" << std::fixed << std::setprecision(2) << progress
-                << "%) " << "Speed: " << speed << " Mkeys/s" << std::endl;
-        logFile.flush();
-      }
-    }
-  }
-};
-
-// Global logger
-SmartMutagenLogger* g_smart_logger = nullptr;
 
 void initConsole() {
 #ifdef _WIN32
@@ -214,7 +73,6 @@ void moveCursorTo(int x, int y) {
 int PUZZLE_NUM = 20;
 int WORKERS = omp_get_num_procs();
 int FLIP_COUNT = -1;
-const __uint128_t REPORT_INTERVAL = 10000000;
 static constexpr int POINTS_BATCH_SIZE = 256;
 static constexpr int HASH_BATCH_SIZE = 8;
 
@@ -277,94 +135,63 @@ string TARGET_HASH160;
 Int BASE_KEY;
 atomic<bool> stop_event(false);
 mutex result_mutex;
-queue<tuple<string, __uint128_t, int, vector<int>>> results;  // Added solution flips
+queue<tuple<string, __uint128_t, int>> results;
 
-union AVXCounter {
-  __m256i vec;
-  uint64_t u64[4];
-  __uint128_t u128[2];
-  AVXCounter() : vec(_mm256_setzero_si256()) {}
+struct AtomicUint128 {
+  std::atomic<uint64_t> low;
+  std::atomic<uint64_t> high;
 
-  AVXCounter(__uint128_t value) { store(value); }
+  AtomicUint128() : low(0), high(0) {}
 
-  void increment() {
-    __m256i one = _mm256_set_epi64x(0, 0, 0, 1);
-    vec = _mm256_add_epi64(vec, one);
+  void reset() {
+    low.store(0, std::memory_order_relaxed);
+    high.store(0, std::memory_order_relaxed);
+  }
 
-    if (u64[0] == 0) {
-      __m256i carry = _mm256_set_epi64x(0, 0, 1, 0);
-      vec = _mm256_add_epi64(vec, carry);
+  void add(uint64_t value) {
+    uint64_t old_low = low.fetch_add(value, std::memory_order_relaxed);
+    if (old_low > std::numeric_limits<uint64_t>::max() - value) {
+      high.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
-  void add(__uint128_t value) {
-    __m256i add_val = _mm256_set_epi64x(0, 0, value >> 64, value);
-    vec = _mm256_add_epi64(vec, add_val);
-
-    if (u64[0] < (value & 0xFFFFFFFFFFFFFFFFULL)) {
-      __m256i carry = _mm256_set_epi64x(0, 0, 1, 0);
-      vec = _mm256_add_epi64(vec, carry);
+  __uint128_t load() const {
+    while (true) {
+      uint64_t high_before = high.load(std::memory_order_acquire);
+      uint64_t low_value = low.load(std::memory_order_acquire);
+      uint64_t high_after = high.load(std::memory_order_acquire);
+      if (high_before == high_after) {
+        return (static_cast<__uint128_t>(high_before) << 64) | low_value;
+      }
     }
-  }
-
-  __uint128_t load() const { return (static_cast<__uint128_t>(u64[1]) << 64) | u64[0]; }
-
-  void store(__uint128_t value) {
-    u64[0] = static_cast<uint64_t>(value);
-    u64[1] = static_cast<uint64_t>(value >> 64);
-    u64[2] = 0;
-    u64[3] = 0;
-  }
-
-  bool operator<(const AVXCounter& other) const {
-    if (u64[1] != other.u64[1]) return u64[1] < other.u64[1];
-    return u64[0] < other.u64[0];
-  }
-
-  bool operator>=(const AVXCounter& other) const {
-    if (u64[1] != other.u64[1]) return u64[1] > other.u64[1];
-    return u64[0] >= other.u64[0];
-  }
-
-  static AVXCounter div(const AVXCounter& num, uint64_t denom) {
-    __uint128_t n = num.load();
-    __uint128_t q = n / denom;
-    return AVXCounter(q);
-  }
-
-  static uint64_t mod(const AVXCounter& num, uint64_t denom) {
-    __uint128_t n = num.load();
-    return n % denom;
-  }
-
-  static AVXCounter mul(uint64_t a, uint64_t b) {
-    __uint128_t result = static_cast<__uint128_t>(a) * b;
-    return AVXCounter(result);
   }
 };
 
-static AVXCounter total_checked_avx;
+AtomicUint128 total_processed;
 __uint128_t total_combinations = 0;
-vector<string> g_threadPrivateKeys;
 mutex progress_mutex;
-
-atomic<uint64_t> globalComparedCount(0);
-atomic<uint64_t> localComparedCount(0);
-double globalElapsedTime = 0.0;
-double mkeysPerSec = 0.0;
 chrono::time_point<chrono::high_resolution_clock> tStart;
+atomic<bool> progress_stop(false);
 
-static std::string formatElapsedTime(double seconds) {
+static constexpr long double TWO_POW_64 = 18446744073709551616.0L;
+
+static long double to_long_double(__uint128_t value) {
+  uint64_t low = static_cast<uint64_t>(value);
+  uint64_t high = static_cast<uint64_t>(value >> 64);
+  return static_cast<long double>(high) * TWO_POW_64 + static_cast<long double>(low);
+}
+
+static string formatElapsedTime(double seconds) {
   int hrs = static_cast<int>(seconds) / 3600;
   int mins = (static_cast<int>(seconds) % 3600) / 60;
   int secs = static_cast<int>(seconds) % 60;
   std::ostringstream oss;
-  oss << std::setw(2) << std::setfill('0') << hrs << ":" << std::setw(2) << std::setfill('0')
-      << mins << ":" << std::setw(2) << std::setfill('0') << secs;
+  oss << std::setw(2) << std::setfill('0') << hrs << ":" << std::setw(2)
+      << std::setfill('0') << mins << ":" << std::setw(2) << std::setfill('0') << secs;
   return oss.str();
 }
 
-static std::string to_string_128(__uint128_t value) {
+static string to_string_128(__uint128_t value) {
   if (value == 0) return "0";
   char buffer[50];
   char* p = buffer + sizeof(buffer);
@@ -373,19 +200,18 @@ static std::string to_string_128(__uint128_t value) {
     *--p = "0123456789"[value % 10];
     value /= 10;
   }
-
-  return std::string(p);
+  return string(p);
 }
 
-void signalHandler(int signum) {
+void signalHandler(int) {
   stop_event.store(true);
+  progress_stop.store(true);
   cout << "\nInterrupt received, shutting down...\n";
-  if (g_smart_logger) g_smart_logger->logOperation("INTERRUPT", "Signal received");
 }
 
 class CombinationGenerator {
   int n, k;
-  std::vector<int> current;
+  vector<int> current;
 
  public:
   CombinationGenerator(int n, int k) : n(n), k(k), current(k) {
@@ -406,15 +232,7 @@ class CombinationGenerator {
     return result;
   }
 
-  static __m256i combinations_count_avx(int n, int k) {
-    alignas(32) uint64_t counts[4];
-    for (int i = 0; i < 4; i++) {
-      counts[i] = combinations_count(n + i, k);
-    }
-    return _mm256_load_si256((__m256i*)counts);
-  }
-
-  const std::vector<int>& get() const { return current; }
+  const vector<int>& get() const { return current; }
 
   bool next() {
     int i = k - 1;
@@ -434,7 +252,6 @@ class CombinationGenerator {
     }
 
     current.resize(k);
-    __uint128_t remaining_rank = rank;
     int a = n;
     int b = k;
     __uint128_t x = (total - 1) - rank;
@@ -459,11 +276,11 @@ inline void prepareShaBlock(const uint8_t* dataSrc, __uint128_t dataLen, uint8_t
   std::fill_n(outBlock, 64, 0);
   std::memcpy(outBlock, dataSrc, dataLen);
   outBlock[dataLen] = 0x80;
-  const uint32_t bitLen = (uint32_t)(dataLen * 8);
-  outBlock[60] = (uint8_t)((bitLen >> 24) & 0xFF);
-  outBlock[61] = (uint8_t)((bitLen >> 16) & 0xFF);
-  outBlock[62] = (uint8_t)((bitLen >> 8) & 0xFF);
-  outBlock[63] = (uint8_t)(bitLen & 0xFF);
+  const uint32_t bitLen = static_cast<uint32_t>(dataLen * 8);
+  outBlock[60] = static_cast<uint8_t>((bitLen >> 24) & 0xFF);
+  outBlock[61] = static_cast<uint8_t>((bitLen >> 16) & 0xFF);
+  outBlock[62] = static_cast<uint8_t>((bitLen >> 8) & 0xFF);
+  outBlock[63] = static_cast<uint8_t>(bitLen & 0xFF);
 }
 
 inline void prepareRipemdBlock(const uint8_t* dataSrc, uint8_t* outBlock) {
@@ -471,18 +288,18 @@ inline void prepareRipemdBlock(const uint8_t* dataSrc, uint8_t* outBlock) {
   std::memcpy(outBlock, dataSrc, 32);
   outBlock[32] = 0x80;
   const uint32_t bitLen = 256;
-  outBlock[60] = (uint8_t)((bitLen >> 24) & 0xFF);
-  outBlock[61] = (uint8_t)((bitLen >> 16) & 0xFF);
-  outBlock[62] = (uint8_t)((bitLen >> 8) & 0xFF);
-  outBlock[63] = (uint8_t)(bitLen & 0xFF);
+  outBlock[60] = static_cast<uint8_t>((bitLen >> 24) & 0xFF);
+  outBlock[61] = static_cast<uint8_t>((bitLen >> 16) & 0xFF);
+  outBlock[62] = static_cast<uint8_t>((bitLen >> 8) & 0xFF);
+  outBlock[63] = static_cast<uint8_t>(bitLen & 0xFF);
 }
 
 static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
                                          uint8_t hashResults[][20]) {
-  alignas(32) std::array<std::array<uint8_t, 64>, HASH_BATCH_SIZE> shaInputs;
-  alignas(32) std::array<std::array<uint8_t, 32>, HASH_BATCH_SIZE> shaOutputs;
-  alignas(32) std::array<std::array<uint8_t, 64>, HASH_BATCH_SIZE> ripemdInputs;
-  alignas(32) std::array<std::array<uint8_t, 20>, HASH_BATCH_SIZE> ripemdOutputs;
+  alignas(32) array<array<uint8_t, 64>, HASH_BATCH_SIZE> shaInputs;
+  alignas(32) array<array<uint8_t, 32>, HASH_BATCH_SIZE> shaOutputs;
+  alignas(32) array<array<uint8_t, 64>, HASH_BATCH_SIZE> ripemdInputs;
+  alignas(32) array<array<uint8_t, 20>, HASH_BATCH_SIZE> ripemdOutputs;
   const __uint128_t totalBatches = (numKeys + (HASH_BATCH_SIZE - 1)) / HASH_BATCH_SIZE;
   for (__uint128_t batch = 0; batch < totalBatches; batch++) {
     const __uint128_t batchCount =
@@ -493,7 +310,7 @@ static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
     }
 
     if (batchCount < HASH_BATCH_SIZE) {
-      static std::array<uint8_t, 64> shaPadding = {};
+      static array<uint8_t, 64> shaPadding = {};
       prepareShaBlock(pubKeys[0], 33, shaPadding.data());
       for (__uint128_t i = batchCount; i < HASH_BATCH_SIZE; i++) {
         std::memcpy(shaInputs[i].data(), shaPadding.data(), 64);
@@ -516,7 +333,7 @@ static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
     }
 
     if (batchCount < HASH_BATCH_SIZE) {
-      static std::array<uint8_t, 64> ripemdPadding = {};
+      static array<uint8_t, 64> ripemdPadding = {};
       prepareRipemdBlock(shaOutputs[0].data(), ripemdPadding.data());
       for (__uint128_t i = batchCount; i < HASH_BATCH_SIZE; i++) {
         std::memcpy(ripemdInputs[i].data(), ripemdPadding.data(), 64);
@@ -540,12 +357,71 @@ static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
   }
 }
 
-void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCounter start,
-            AVXCounter end) {
-  if (g_smart_logger) {
-    g_smart_logger->logAlgorithmStep(
-        "WORKER_START", "Thread " + std::to_string(threadId) + " starts processing combinations " +
-                            to_string_128(start.load()) + " to " + to_string_128(end.load()));
+void progressReporter(__uint128_t total_work) {
+  while (!progress_stop.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto now = chrono::high_resolution_clock::now();
+    __uint128_t processed = total_processed.load();
+    long double processedLD = to_long_double(processed);
+    long double totalLD = to_long_double(total_work);
+    double progress = 0.0;
+    if (totalLD > 0.0L) {
+      long double ratio = processedLD / totalLD * 100.0L;
+      progress = static_cast<double>(std::min<long double>(ratio, 100.0L));
+    }
+
+    double elapsed = chrono::duration<double>(now - tStart).count();
+    double avgSpeed = 0.0;
+    if (elapsed > 0.0) {
+      avgSpeed = static_cast<double>((processedLD / 1e6L) / elapsed);
+    }
+
+    {
+      lock_guard<mutex> lock(progress_mutex);
+      moveCursorTo(0, 10);
+      cout << "Progress: " << fixed << setprecision(6) << progress << "%\n";
+      cout << "Processed: " << to_string_128(processed) << "\n";
+      cout << "Speed: " << fixed << setprecision(2) << avgSpeed << " Mkeys/s\n";
+      cout << "Elapsed Time: " << formatElapsedTime(elapsed) << "\n";
+      cout.flush();
+    }
+
+    if (stop_event.load()) {
+      break;
+    }
+  }
+
+  auto now = chrono::high_resolution_clock::now();
+  __uint128_t processed = total_processed.load();
+  long double processedLD = to_long_double(processed);
+  long double totalLD = to_long_double(total_work);
+  double progress = 0.0;
+  if (totalLD > 0.0L) {
+    long double ratio = processedLD / totalLD * 100.0L;
+    progress = static_cast<double>(std::min<long double>(ratio, 100.0L));
+  }
+  double elapsed = chrono::duration<double>(now - tStart).count();
+  double avgSpeed = 0.0;
+  if (elapsed > 0.0) {
+    avgSpeed = static_cast<double>((processedLD / 1e6L) / elapsed);
+  }
+
+  {
+    lock_guard<mutex> lock(progress_mutex);
+    moveCursorTo(0, 10);
+    cout << "Progress: " << fixed << setprecision(6) << progress << "%\n";
+    cout << "Processed: " << to_string_128(processed) << "\n";
+    cout << "Speed: " << fixed << setprecision(2) << avgSpeed << " Mkeys/s\n";
+    cout << "Elapsed Time: " << formatElapsedTime(elapsed) << "\n";
+    cout.flush();
+  }
+}
+
+void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, __uint128_t start,
+            __uint128_t end) {
+  (void)threadId;
+  if (start >= end) {
+    return;
   }
 
   const int fullBatchSize = 2 * POINTS_BATCH_SIZE;
@@ -573,45 +449,25 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCo
   alignas(32) Int pointBatchY[fullBatchSize];
 
   CombinationGenerator gen(bit_length, flip_count);
-  gen.unrank(start.load());
+  gen.unrank(start);
+  if (gen.get().empty()) {
+    return;
+  }
 
-  AVXCounter count;
-  count.store(start.load());
+  __uint128_t currentIndex = start;
+  uint64_t localComboCount = 0;
 
-  uint64_t actual_work_done = 0;
-  auto last_report = chrono::high_resolution_clock::now();
-
-  while (!stop_event.load() && count < end) {
+  while (!stop_event.load() && currentIndex < end) {
     Int currentKey;
     currentKey.Set(&BASE_KEY);
 
     const vector<int>& flips = gen.get();
-
-    // LOG COMBINATION GENERATION
-    if (g_smart_logger) {
-      g_smart_logger->logCombinationGeneration(threadId, count.load(), flips);
-    }
-
-    // Apply flips
     for (int pos : flips) {
       Int mask;
       mask.SetInt32(1);
       mask.ShiftL(pos);
       currentKey.Xor(&mask);
     }
-
-    string keyStr = currentKey.GetBase16();
-    keyStr = string(64 - keyStr.length(), '0') + keyStr;
-
-    // LOG KEY MUTATION DETAILS (first 10, then every 10000th)
-    if (g_smart_logger && (count.load() < 10 || count.load() % 10000 == 0)) {
-      string baseKeyStr = BASE_KEY.GetBase16();
-      baseKeyStr = string(64 - baseKeyStr.length(), '0') + baseKeyStr;
-      g_smart_logger->logKeyMutationStrategy(threadId, baseKeyStr, flips, keyStr, count.load());
-    }
-
-#pragma omp critical
-    { g_threadPrivateKeys[threadId] = keyStr; }
 
     Point startPoint = secp->ComputePublicKey(&currentKey);
     Int startPointX, startPointY, startPointXNeg;
@@ -678,7 +534,7 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCo
     }
 
     int localBatchCount = 0;
-    for (int i = 0; i < fullBatchSize && localBatchCount < HASH_BATCH_SIZE; i++) {
+    for (int i = 0; i < fullBatchSize && !stop_event.load(); i++) {
       Point tempPoint;
       tempPoint.x.Set(&pointBatchX[i]);
       tempPoint.y.Set(&pointBatchY[i]);
@@ -693,11 +549,9 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCo
       if (localBatchCount == HASH_BATCH_SIZE) {
         computeHash160BatchBinSingle(localBatchCount, localPubKeys, localHashResults);
 
-        actual_work_done += HASH_BATCH_SIZE;
-        localComparedCount += HASH_BATCH_SIZE;
-
         for (int j = 0; j < HASH_BATCH_SIZE; j++) {
-          __m256i cand = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(localHashResults[j]));
+          __m256i cand =
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(localHashResults[j]));
 
           __m256i cmp = _mm256_cmpeq_epi8(cand, target16);
           int mask = _mm256_movemask_epi8(cmp);
@@ -712,14 +566,10 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCo
             }
 
             if (fullMatch) {
-              auto tEndTime = chrono::high_resolution_clock::now();
-              globalElapsedTime = chrono::duration<double>(tEndTime - tStart).count();
-
-              {
-                lock_guard<mutex> lock(progress_mutex);
-                globalComparedCount += actual_work_done;
-                mkeysPerSec = (double)globalComparedCount / globalElapsedTime / 1e6;
-              }
+              localComboCount++;
+              total_processed.add(localComboCount);
+              __uint128_t processedSnapshot = total_processed.load();
+              localComboCount = 0;
 
               Int foundKey;
               foundKey.Set(&currentKey);
@@ -737,78 +587,90 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCo
               string hexKey = foundKey.GetBase16();
               hexKey = string(64 - hexKey.length(), '0') + hexKey;
 
-              // Convert hash to hex for logging
-              std::ostringstream hashHex;
-              hashHex << std::hex << std::setfill('0');
-              for (int k = 0; k < 20; k++) {
-                hashHex << std::setw(2) << (int)localHashResults[j][k];
+              {
+                lock_guard<mutex> lock(result_mutex);
+                results.push(make_tuple(hexKey, processedSnapshot, flip_count));
               }
-
-              // LOG SOLUTION WITH ANALYSIS
-              if (g_smart_logger) {
-                g_smart_logger->logSolutionAnalysis(hexKey, hashHex.str(), total_checked_avx.load(),
-                                                    flips);
-              }
-
-              lock_guard<mutex> lock(result_mutex);
-              results.push(make_tuple(hexKey, total_checked_avx.load(), flip_count, flips));
               stop_event.store(true);
               return;
             }
           }
         }
 
-        total_checked_avx.increment();
         localBatchCount = 0;
+      }
+    }
 
-        __uint128_t current_total = total_checked_avx.load();
-        if (current_total % REPORT_INTERVAL == 0 || count.load() == end.load() - 1) {
-          auto now = chrono::high_resolution_clock::now();
-          globalElapsedTime = chrono::duration<double>(now - tStart).count();
+    if (stop_event.load()) {
+      break;
+    }
 
-          globalComparedCount += localComparedCount;
-          localComparedCount = 0;
-          mkeysPerSec = (double)globalComparedCount / globalElapsedTime / 1e6;
-          double progress = min(100.0, (double)current_total / total_combinations * 100.0);
-
-          // LOG PROGRESS
-          if (g_smart_logger) {
-            g_smart_logger->logProgress(globalComparedCount, total_combinations, mkeysPerSec);
+    if (localBatchCount > 0) {
+      computeHash160BatchBinSingle(localBatchCount, localPubKeys, localHashResults);
+      for (int j = 0; j < localBatchCount; j++) {
+        __m256i cand =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(localHashResults[j]));
+        __m256i cmp = _mm256_cmpeq_epi8(cand, target16);
+        int mask = _mm256_movemask_epi8(cmp);
+        if ((mask & 0x0F) == 0x0F) {
+          bool fullMatch = true;
+          for (int k = 0; k < 20; k++) {
+            if (localHashResults[j][k] != TARGET_HASH160_RAW[k]) {
+              fullMatch = false;
+              break;
+            }
           }
+          if (fullMatch) {
+            localComboCount++;
+            total_processed.add(localComboCount);
+            __uint128_t processedSnapshot = total_processed.load();
+            localComboCount = 0;
 
-          lock_guard<mutex> lock(progress_mutex);
-          moveCursorTo(0, 10);
-          cout << "Progress: " << fixed << setprecision(6) << progress << "%\n";
-          cout << "Processed: " << to_string_128(current_total) << "\n";
-          cout << "Speed: " << fixed << setprecision(2) << mkeysPerSec << " Mkeys/s\n";
-          cout << "Elapsed Time: " << formatElapsedTime(globalElapsedTime) << "\n";
-          cout.flush();
+            Int foundKey;
+            foundKey.Set(&currentKey);
+            int idx = pointIndices[j];
+            if (idx < 256) {
+              Int offset;
+              offset.SetInt32(idx);
+              foundKey.Add(&offset);
+            } else {
+              Int offset;
+              offset.SetInt32(idx - 256);
+              foundKey.Sub(&offset);
+            }
 
-          if (current_total >= total_combinations) {
+            string hexKey = foundKey.GetBase16();
+            hexKey = string(64 - hexKey.length(), '0') + hexKey;
+
+            {
+              lock_guard<mutex> lock(result_mutex);
+              results.push(make_tuple(hexKey, processedSnapshot, flip_count));
+            }
             stop_event.store(true);
-            break;
+            return;
           }
         }
       }
+      localBatchCount = 0;
+    }
+
+    localComboCount++;
+    if (localComboCount >= 4096) {
+      total_processed.add(localComboCount);
+      localComboCount = 0;
     }
 
     if (!gen.next()) {
       break;
     }
-    count.increment();
-
-    if (count >= end) {
+    currentIndex++;
+    if (currentIndex >= end) {
       break;
     }
   }
 
-  if (!stop_event.load() && total_checked_avx.load() >= total_combinations) {
-    stop_event.store(true);
-  }
-
-  if (g_smart_logger) {
-    g_smart_logger->logAlgorithmStep("WORKER_END",
-                                     "Thread " + std::to_string(threadId) + " finished");
+  if (localComboCount > 0) {
+    total_processed.add(localComboCount);
   }
 }
 
@@ -824,12 +686,14 @@ void printUsage(const char* programName) {
 }
 
 int main(int argc, char* argv[]) {
-  // INITIALIZE SMART LOGGER
-  g_smart_logger = new SmartMutagenLogger("mutagen_analysis.log");
-  g_smart_logger->logOperation("PROGRAM_START",
-                               "Mutagen AVX2 Puzzle Solver - Algorithm Analysis Mode");
-
   signal(SIGINT, signalHandler);
+  stop_event.store(false);
+  progress_stop.store(false);
+  total_processed.reset();
+  {
+    lock_guard<mutex> lock(result_mutex);
+    results = {};
+  }
 
   int opt;
   int option_index = 0;
@@ -892,7 +756,7 @@ int main(int argc, char* argv[]) {
 
   TARGET_HASH160 = TARGET_HASH160_HEX;
 
-  for (__uint128_t i = 0; i < 20; i++) {
+  for (int i = 0; i < 20; i++) {
     TARGET_HASH160_RAW[i] = stoul(TARGET_HASH160.substr(i * 2, 2), nullptr, 16);
   }
 
@@ -914,27 +778,12 @@ int main(int argc, char* argv[]) {
 
   string paddedKey = BASE_KEY.GetBase16();
   size_t firstNonZero = paddedKey.find_first_not_of('0');
-
   if (string::npos == firstNonZero) {
     paddedKey = "0";
   } else {
     paddedKey = paddedKey.substr(firstNonZero);
   }
-
   paddedKey = "0x" + paddedKey;
-
-  // LOG ALGORITHM SETUP
-  g_smart_logger->logAlgorithmStep("ALGORITHM_SETUP", "Puzzle " + std::to_string(PUZZLE_NUM) +
-                                                          " with " + std::to_string(FLIP_COUNT) +
-                                                          " bit flips");
-  g_smart_logger->logAlgorithmStep(
-      "BASE_KEY", "Starting from key: " + paddedKey + " (decimal: " + PRIVATE_KEY_DECIMAL + ")");
-  g_smart_logger->logAlgorithmStep("TARGET", "Looking for hash160: " + TARGET_HASH160);
-  g_smart_logger->logAlgorithmStep(
-      "COMBINATIONS", "Total combinations to test: " + to_string_128(total_combinations));
-  g_smart_logger->logAlgorithmStep("MUTATION_STRATEGY",
-                                   "Will flip " + std::to_string(FLIP_COUNT) + " bits out of " +
-                                       std::to_string(PUZZLE_NUM) + " available bit positions");
 
   clearTerminal();
   cout << "=======================================\n";
@@ -955,26 +804,21 @@ int main(int argc, char* argv[]) {
   }
   cout << "Total Flips: " << to_string_128(total_combinations) << "\n";
   cout << "Using: " << WORKERS << " threads\n";
-  cout << "Algorithm analysis log: mutagen_analysis.log\n";
   cout << "\n";
 
-  g_threadPrivateKeys.resize(WORKERS, "0");
+  thread progressThread(progressReporter, total_combinations);
+
   vector<thread> threads;
+  threads.reserve(WORKERS);
 
-  AVXCounter total_combinations_avx;
-  total_combinations_avx.store(total_combinations);
-
-  AVXCounter comb_per_thread = AVXCounter::div(total_combinations_avx, WORKERS);
-  uint64_t remainder = AVXCounter::mod(total_combinations_avx, WORKERS);
+  __uint128_t baseRange = total_combinations / WORKERS;
+  __uint128_t remainder = total_combinations % WORKERS;
+  uint64_t remainder64 = static_cast<uint64_t>(remainder);
 
   for (int i = 0; i < WORKERS; i++) {
-    AVXCounter start, end;
-
-    AVXCounter base = AVXCounter::mul(i, comb_per_thread.load());
-    uint64_t extra = min(static_cast<uint64_t>(i), remainder);
-    start.store(base.load() + extra);
-
-    end.store(start.load() + comb_per_thread.load() + (i < remainder ? 1 : 0));
+    __uint128_t extra = (i < static_cast<int>(remainder64)) ? 1 : 0;
+    __uint128_t start = baseRange * i + static_cast<__uint128_t>(std::min(i, static_cast<int>(remainder64)));
+    __uint128_t end = start + baseRange + extra;
     threads.emplace_back(worker, &secp, PUZZLE_NUM, FLIP_COUNT, i, start, end);
   }
 
@@ -984,12 +828,32 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  if (!results.empty()) {
-    auto [hex_key, checked, flips, solution_flips] = results.front();
-    globalElapsedTime =
-        chrono::duration<double>(chrono::high_resolution_clock::now() - tStart).count();
-    mkeysPerSec = (double)globalComparedCount / globalElapsedTime / 1e6;
+  progress_stop.store(true);
+  if (progressThread.joinable()) {
+    progressThread.join();
+  }
 
+  auto finishTime = chrono::high_resolution_clock::now();
+  double elapsed = chrono::duration<double>(finishTime - tStart).count();
+  __uint128_t processed = total_processed.load();
+  long double processedLD = to_long_double(processed);
+  double avgSpeed = 0.0;
+  if (elapsed > 0.0) {
+    avgSpeed = static_cast<double>((processedLD / 1e6L) / elapsed);
+  }
+
+  tuple<string, __uint128_t, int> solution;
+  bool hasSolution = false;
+  {
+    lock_guard<mutex> lock(result_mutex);
+    if (!results.empty()) {
+      solution = results.front();
+      hasSolution = true;
+    }
+  }
+
+  if (hasSolution) {
+    auto [hex_key, checked, flips] = solution;
     string compactHex = hex_key;
     size_t firstNonZeroCompact = compactHex.find_first_not_of('0');
 
@@ -1006,9 +870,9 @@ int main(int argc, char* argv[]) {
     cout << "Private key: " << compactHex << "\n";
     cout << "Checked " << to_string_128(checked) << " combinations\n";
     cout << "Bit flips: " << flips << endl;
-    cout << "Time: " << fixed << setprecision(2) << globalElapsedTime << " seconds ("
-         << formatElapsedTime(globalElapsedTime) << ")\n";
-    cout << "Speed: " << fixed << setprecision(2) << mkeysPerSec << " Mkeys/s\n";
+    cout << "Time: " << fixed << setprecision(2) << elapsed << " seconds ("
+         << formatElapsedTime(elapsed) << ")\n";
+    cout << "Speed: " << fixed << setprecision(2) << avgSpeed << " Mkeys/s\n";
 
     ofstream out("puzzle_" + to_string(PUZZLE_NUM) + "_solution.txt");
     if (out) {
@@ -1019,23 +883,11 @@ int main(int argc, char* argv[]) {
       cerr << "Failed to save solution to file!\n";
     }
   } else {
-    __uint128_t final_count = total_checked_avx.load();
-    globalElapsedTime =
-        chrono::duration<double>(chrono::high_resolution_clock::now() - tStart).count();
-
-    if (globalElapsedTime > 1e-6) {
-      mkeysPerSec = (double)globalComparedCount / globalElapsedTime / 1e6;
-    } else {
-      mkeysPerSec = 0.0;
-    }
-    cout << "\n\nNo solution found. Checked " << to_string_128(final_count) << " combinations\n";
-    cout << "Time: " << fixed << setprecision(2) << globalElapsedTime << " seconds ("
-         << formatElapsedTime(globalElapsedTime) << ")\n";
-    cout << "Speed: " << fixed << setprecision(2) << mkeysPerSec << " Mkeys/s\n";
+    cout << "\n\nNo solution found. Checked " << to_string_128(processed) << " combinations\n";
+    cout << "Time: " << fixed << setprecision(2) << elapsed << " seconds ("
+         << formatElapsedTime(elapsed) << ")\n";
+    cout << "Speed: " << fixed << setprecision(2) << avgSpeed << " Mkeys/s\n";
   }
 
-  g_smart_logger->logAlgorithmStep(
-      "PROGRAM_END", "Analysis complete. Total time: " + std::to_string(globalElapsedTime) + "s");
-  delete g_smart_logger;
   return 0;
 }
